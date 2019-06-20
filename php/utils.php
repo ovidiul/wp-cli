@@ -631,9 +631,12 @@ function replace_path_consts( $source, $path ) {
  * @param string $url       URL to make the HTTP request to.
  * @param array $headers    Add specific headers to the request.
  * @param array $options
+ * @param array $options
+ * @param int $retries      Number of default retries for timeout connects
+ * @param bool $verify_ssl  Option to verify SSL on the curl request
  * @return object
  */
-function http_request( $method, $url, $data = null, $headers = array(), $options = array() ) {
+function http_request( $method, $url, $data = null, $headers = array(), $options = array(), $retries = 3, $verify_ssl = true ) {
 
 	$cert_path     = '/rmccue/requests/library/Requests/Transport/cacert.pem';
 	$halt_on_error = ! isset( $options['halt_on_error'] ) || (bool) $options['halt_on_error'];
@@ -658,9 +661,19 @@ function http_request( $method, $url, $data = null, $headers = array(), $options
 		}
 	}
 
+	if( !$verify_ssl ) {
+        $options['verify'] = false;
+    }
+
 	try {
 		return \Requests::request( $url, $headers, $data, $method, $options );
 	} catch ( \Requests_Exception $ex ) {
+
+	    if( $retries && in_array( curl_errno( $ex->getData() ), array( CURLE_OPERATION_TIMEDOUT, CURLE_OPERATION_TIMEOUTED) ) ) {
+            \WP_CLI::warning( sprintf( "Operation timeout on fetching url '%s' %s. Retrying...", $url, $ex->getMessage() ) );
+            http_request( $method, $url, $data, $headers, $options, $retries);
+        }
+
 		// CURLE_SSL_CACERT_BADFILE only defined for PHP >= 7.
 		if ( 'curlerror' !== $ex->getType() || ! in_array( curl_errno( $ex->getData() ), array( CURLE_SSL_CONNECT_ERROR, CURLE_SSL_CERTPROBLEM, 77 /*CURLE_SSL_CACERT_BADFILE*/ ), true ) ) {
 			$error_msg = sprintf( "Failed to get url '%s': %s.", $url, $ex->getMessage() );
@@ -671,16 +684,7 @@ function http_request( $method, $url, $data = null, $headers = array(), $options
 		}
 		// Handle SSL certificate issues gracefully
 		\WP_CLI::warning( sprintf( "Re-trying without verify after failing to get verified url '%s' %s.", $url, $ex->getMessage() ) );
-		$options['verify'] = false;
-		try {
-			return \Requests::request( $url, $headers, $data, $method, $options );
-		} catch ( \Requests_Exception $ex ) {
-			$error_msg = sprintf( "Failed to get non-verified url '%s' %s.", $url, $ex->getMessage() );
-			if ( $halt_on_error ) {
-				WP_CLI::error( $error_msg );
-			}
-			throw new \RuntimeException( $error_msg, null, $ex );
-		}
+        http_request( $method, $url, $data, $headers, $options, $retries, false);
 	}
 }
 
